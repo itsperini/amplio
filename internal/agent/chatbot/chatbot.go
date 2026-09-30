@@ -27,6 +27,7 @@ import (
 	"amplio/internal/config"
 	"amplio/internal/session"
 	"amplio/internal/tool/bash"
+	"amplio/internal/tool/recall"
 )
 
 //go:embed chatbot_core.md
@@ -109,8 +110,11 @@ func factory(env *agent.Env, cfg *agent.Config) (agent.Agent, error) {
 			briefings,
 		Tools:       tools,
 		Interactive: true,
-		CLITools:    cli.DefaultTools(),
-		BlobStore:   blob.NewStore(config.BlobDir(env.RunID)),
+		// A chatbot has no task, so its seed is only what doesn't need a query:
+		// the operator's pinned skills (see recall.InitialContent).
+		InitialRecall: recall.Seeder(env.SkillIndex, env.LessonIndex),
+		CLITools:      cli.DefaultTools(),
+		BlobStore:     blob.NewStore(config.BlobDir(env.RunID)),
 	})
 
 	return ag, nil

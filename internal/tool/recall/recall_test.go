@@ -149,6 +149,64 @@ func TestRecallInitialContent(t *testing.T) {
 	}
 }
 
+// Pinned skills: their own section, always (even with no task), never repeated
+// among the relevant ones; [skills].initial = 0 drops the relevant section.
+func TestRecallInitialContent_Pinned(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	write := func(dir, name, desc string) {
+		d := filepath.Join(root, dir, name)
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		content := "---\nname: " + name + "\ndescription: " + desc + "\n---\n\nbody"
+		if err := os.WriteFile(filepath.Join(d, "SKILL.md"), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("lib", "spanner", "query spanner sql databases")
+	write("lib", "gmail", "read and send email messages")
+	write("mine", "tune-model", "tune hyperparameters of our model")
+	store, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	skillIx := skills.NewIndex([]skills.Source{
+		{Name: "lib", Path: filepath.Join(root, "lib")},
+		{Name: "mine", Path: filepath.Join(root, "mine"), Pinned: true},
+	}, embed.Mock{Dim: 4096}, skills.NewDBCache(store))
+	if err := skillIx.Build(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	c := InitialContent(ctx, skillIx, nil, "query spanner sql")
+	pinnedAt := strings.Index(c, "Skills pinned by the operator")
+	otherAt := strings.Index(c, "Other skills that may be relevant")
+	if pinnedAt < 0 || otherAt < pinnedAt {
+		t.Fatalf("want the pinned section, then the relevant one:\n%s", c)
+	}
+	if !strings.Contains(c[pinnedAt:otherAt], "skill:tune-model") || !strings.Contains(c[otherAt:], "skill:spanner") {
+		t.Errorf("tune-model belongs under pinned, spanner under relevant:\n%s", c)
+	}
+	if strings.Count(c, "skill:tune-model") != 1 {
+		t.Errorf("a pinned skill must not also be listed as relevant:\n%s", c)
+	}
+
+	// No task (a chat session): the pinned section only.
+	c = InitialContent(ctx, skillIx, nil, "")
+	if !strings.Contains(c, "skill:tune-model") || strings.Contains(c, "skill:spanner") || strings.Contains(c, "relevant") {
+		t.Errorf("no task: want only the pinned skill:\n%s", c)
+	}
+
+	// [skills].initial = 0: pinned only, even with a task.
+	skillIx.SetInitialLimit(0)
+	c = InitialContent(ctx, skillIx, nil, "query spanner sql")
+	if !strings.Contains(c, "skill:tune-model") || strings.Contains(c, "skill:spanner") {
+		t.Errorf("initial=0: want only the pinned skill:\n%s", c)
+	}
+}
+
 // The instance-wide isolation switch: no lesson reaches an agent through any of
 // the three surfaces, while the index itself still answers — that is what
 // end-of-run mining, its near-duplicate check, lesson scoring and the

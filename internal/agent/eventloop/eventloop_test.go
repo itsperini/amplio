@@ -1398,6 +1398,54 @@ func TestBootstrap_TaskOrderedLastAmongFraming(t *testing.T) {
 	}
 }
 
+// A session with no task (a chat session) is still seeded — with an empty query,
+// so the seeder returns only what needs none (the operator's pinned skills) —
+// at step 0, where it survives compaction. An empty seed writes nothing.
+func TestBootstrap_NoTaskSeedsInitialRecall(t *testing.T) {
+	for _, tc := range []struct {
+		name, seed string
+		wantEvent  bool
+	}{
+		{"pinned skills", "pinned skills", true},
+		{"nothing to seed", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, runID, registry := testSetup(t)
+			ctx := context.Background()
+			var gotTask *string
+			ag := newT(testCfg{
+				RunID: runID, SessionID: "chatty-bot", AgentType: "chatbot", Interactive: true,
+				SystemPrompt: "sys", LLM: &llm.MockProvider{}, Store: store, Registry: registry,
+				Workspace: plain.New("/tmp"), IdleTimeout: 10 * time.Millisecond,
+				InitialRecall: func(_ context.Context, task string) string { gotTask = &task; return tc.seed },
+			})
+			if err := ag.Run(ctx); err != nil { // no task, no message: parks, then idles out
+				t.Fatal(err)
+			}
+			if gotTask == nil || *gotTask != "" {
+				t.Fatalf("seeder called with task %v, want called once with \"\"", gotTask)
+			}
+			step0 := int(0)
+			events, err := store.GetEvents(ctx, runID, "chatty-bot", db.EventFilter{EndStep: &step0})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var seeded []string
+			for _, rec := range events {
+				if e, ok := rec.Event.(*event.SystemEvent); ok && e.Marker == event.MarkerInitialRecall {
+					seeded = append(seeded, e.Content)
+				}
+			}
+			if tc.wantEvent && (len(seeded) != 1 || seeded[0] != tc.seed) {
+				t.Errorf("step-0 initial_recall = %v, want [%q]", seeded, tc.seed)
+			}
+			if !tc.wantEvent && len(seeded) != 0 {
+				t.Errorf("step-0 initial_recall = %v, want none for an empty seed", seeded)
+			}
+		})
+	}
+}
+
 // TestBuildMessages_HoistsLeadingSystemCluster verifies the projection layer:
 // the contiguous leading run of system events is folded into systemPrompt, the
 // Task becomes the first user message, and a post-task system event (recall)

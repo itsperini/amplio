@@ -85,6 +85,12 @@ recall search.
 Both need `embed_model` to be set; without it recall is disabled and amplio says
 so at startup.
 
+To get the agent started, each session also begins with a short list of the
+skills and lessons most relevant to its task, plus any skills you **pinned** to
+be listed every time (`[skills] pinned`, see
+[configuration](configuration.md#what-an-agent-sees-at-session-start)). Only
+names and descriptions are listed; the agent loads the ones it needs.
+
 ## Seeing what an agent was actually told
 
 The composed prompt is written into the session's own log as its step-0 event.

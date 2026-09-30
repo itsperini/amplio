@@ -20,6 +20,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"amplio/internal/config"
@@ -97,6 +98,50 @@ func printRecallStatus(w io.Writer, st recallStatus) {
 	line("knowledge", st.knowledge)
 }
 
+// pinnedSkillsWarn is the pinned-skill count above which startup warns: every
+// session (sub-agents included) lists every pinned skill, so a large pinned set
+// costs context on every agent. A warning, not a cap — the operator asked.
+const pinnedSkillsWarn = 50
+
+// skillSources maps the configured skill dirs to index sources, marking the
+// ones named in [skills].pinned. It also returns the pinned entries that match
+// no configured dir (compared after cleaning), which the caller reports and
+// ignores.
+func skillSources(dirs []string, sc config.SkillsConfig) (sources []skills.Source, unknownPinned []string) {
+	pinned := make(map[string]bool, len(sc.Pinned))
+	for _, p := range sc.Pinned {
+		pinned[filepath.Clean(p)] = true
+	}
+	matched := make(map[string]bool, len(pinned))
+	sources = make([]skills.Source, 0, len(dirs))
+	for _, d := range dirs {
+		isPinned := pinned[filepath.Clean(d)]
+		if isPinned {
+			matched[filepath.Clean(d)] = true
+		}
+		sources = append(sources, skills.Source{Name: d, Path: d, Blocked: sc.Blocked, Pinned: isPinned})
+	}
+	for _, p := range sc.Pinned {
+		if !matched[filepath.Clean(p)] {
+			unknownPinned = append(unknownPinned, p)
+		}
+	}
+	return sources, unknownPinned
+}
+
+// skillCounts renders the skills status detail ("828 skills", or "828 skills, 20
+// pinned"), warning when the pinned set is large enough to matter.
+func skillCounts(ix *skills.Index, total int) string {
+	n := ix.PinnedCount()
+	if n == 0 {
+		return fmt.Sprintf("%d skills", total)
+	}
+	if n > pinnedSkillsWarn {
+		slog.Warn("many pinned skills: every session lists all of them at start", "pinned", n)
+	}
+	return fmt.Sprintf("%d skills, %d pinned", total, n)
+}
+
 // setupRecall builds the skill and lesson recall indexes from config, installs
 // them on the manager, and returns them (nil when unavailable). Lessons build
 // SYNCHRONOUSLY (DB-only — fast: ~ms).
@@ -169,11 +214,14 @@ func setupRecall(ctx context.Context, mgr *runtime.RunManager, store db.Store, c
 		st.skills = recallDisabled("no skill dirs configured")
 		return skillIx, lessonIx, embedder
 	}
-	sources := make([]skills.Source, 0, len(dirs))
-	for _, d := range dirs {
-		sources = append(sources, skills.Source{Name: d, Path: d, Blocked: cfg.Skills.Blocked})
+	sources, unknownPinned := skillSources(dirs, cfg.Skills)
+	if len(unknownPinned) > 0 {
+		// A typo must not stop startup, but it must not pass silently either.
+		slog.Warn("[skills] pinned names directories that are not skill dirs; ignored",
+			"pinned", unknownPinned, "dirs", dirs)
 	}
 	skillIx = skills.NewIndex(sources, embedder, skills.NewDBCache(store))
+	skillIx.SetInitialLimit(cfg.SkillsInitial())
 	mgr.SetSkillIndex(skillIx)
 
 	// Stage 1: hydrate from cache. Fast even with hundreds of skills.
@@ -186,7 +234,7 @@ func setupRecall(ctx context.Context, mgr *runtime.RunManager, store db.Store, c
 		if err := skillIx.Build(ctx); err != nil {
 			st.skills = recallDisabled(fmt.Sprintf("index build failed: %s", err))
 		} else {
-			st.skills = recallEnabled(fmt.Sprintf("%d skills", skillIx.Size()))
+			st.skills = recallEnabled(skillCounts(skillIx, skillIx.Size()))
 		}
 		return skillIx, lessonIx, embedder
 	}
@@ -195,7 +243,7 @@ func setupRecall(ctx context.Context, mgr *runtime.RunManager, store db.Store, c
 	// window the index serves cached results (possibly slightly stale for
 	// skills whose SKILL.md changed since the last run); the atomic swap at
 	// Build's end refreshes everything.
-	st.skills = recallEnabled(fmt.Sprintf("%d skills, reconciling in background", hydrated))
+	st.skills = recallEnabled(skillCounts(skillIx, hydrated) + ", reconciling in background")
 	go func() {
 		start := time.Now()
 		if err := skillIx.Build(ctx); err != nil {

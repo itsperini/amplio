@@ -14,7 +14,11 @@
 
 package skills
 
-import "log/slog"
+import (
+	"log/slog"
+	"path/filepath"
+	"strings"
+)
 
 // Source is a directory tree of skills to scan, with an optional per-source
 // blocklist of skill names to exclude.
@@ -22,6 +26,38 @@ type Source struct {
 	Name    string
 	Path    string
 	Blocked []string
+	// Pinned marks every skill from this source to be listed at session start
+	// regardless of relevance (see Index.Initial).
+	Pinned bool
+}
+
+// sourceOf returns the index of the source an entry belongs to — the source
+// whose Path is the longest directory prefix of the entry's SKILL.md path — or
+// -1 if none matches. Path-based rather than recorded at scan time so the same
+// rule attributes entries hydrated from the cache (which stores the path, not
+// the source) and entries from a fresh scan. For an overridden name the entry
+// is the winning (later) definition, so it resolves to the winning source.
+func sourceOf(sources []Source, entryPath string) int {
+	p := filepath.Clean(entryPath)
+	best, bestLen := -1, -1
+	for i, src := range sources {
+		root := filepath.Clean(src.Path)
+		if (p == root || strings.HasPrefix(p, root+string(filepath.Separator))) && len(root) > bestLen {
+			best, bestLen = i, len(root)
+		}
+	}
+	return best
+}
+
+// pinnedNames returns the names of the entries that belong to a pinned source.
+func pinnedNames(sources []Source, entries map[string]Entry) map[string]bool {
+	pinned := make(map[string]bool)
+	for name, e := range entries {
+		if i := sourceOf(sources, e.Path); i >= 0 && sources[i].Pinned {
+			pinned[name] = true
+		}
+	}
+	return pinned
 }
 
 // scanSources scans every source in order and merges into a flat entry list.

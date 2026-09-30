@@ -101,6 +101,30 @@ type SkillsConfig struct {
 	// → skills disabled. See Config.SkillDirs.
 	Dirs    []string `toml:"dirs"`
 	Blocked []string `toml:"blocked"` // skill names to exclude from all sources
+	// Initial is how many skills, ranked by relevance to the task, are listed
+	// at session start (in addition to pinned ones). Omitted (nil) →
+	// DefaultSkillsInitial; 0 lists none. A pointer so an absent key is
+	// distinguishable from an explicit 0. See Config.SkillsInitial.
+	Initial *int `toml:"initial"`
+	// Pinned are skill source directories (entries of Dirs) whose skills are
+	// ALWAYS listed at session start, regardless of relevance and outside the
+	// Initial count. For a small, domain-specific skill set the operator wants
+	// every agent to know about.
+	Pinned []string `toml:"pinned"`
+}
+
+// DefaultSkillsInitial is how many relevance-ranked skills are listed at
+// session start when [skills].initial is omitted.
+const DefaultSkillsInitial = 5
+
+// SkillsInitial returns how many relevance-ranked skills to list at session
+// start: [skills].initial, or DefaultSkillsInitial when omitted. A negative
+// value reads as 0.
+func (c Config) SkillsInitial() int {
+	if c.Skills.Initial == nil {
+		return DefaultSkillsInitial
+	}
+	return max(*c.Skills.Initial, 0)
 }
 
 // LessonsConfig is the [lessons] section: what an instance may do with the
@@ -231,6 +255,9 @@ func Load(dataDir string) (Config, error) {
 	cfg.DB = expandTilde(cfg.DB)
 	for i, d := range cfg.Skills.Dirs {
 		cfg.Skills.Dirs[i] = expandTilde(d)
+	}
+	for i, d := range cfg.Skills.Pinned {
+		cfg.Skills.Pinned[i] = expandTilde(d)
 	}
 	if cfg.DB == "" {
 		cfg.DB = filepath.Join(dataDir, "amplio.db")

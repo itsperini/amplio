@@ -577,7 +577,8 @@ func (a *EventLoopAgent) bootstrap(ctx context.Context) error {
 	// the leading run of system events into the provider's native system slot, so
 	// the Task becomes the first actual user turn. The one exception is
 	// initial_recall, which is seeded AFTER the task — it's task-derived search
-	// results, so it reads correctly as a follow-on to the task.
+	// results, so it reads correctly as a follow-on to the task. (A session with
+	// no task still gets the query-free part of it — pinned skills — as framing.)
 
 	// New-session marker first: pure framing ("a fresh agent session begins"),
 	// plus where this session sits in the run, so a sub-agent knows its depth.
@@ -646,13 +647,15 @@ func (a *EventLoopAgent) bootstrap(ctx context.Context) error {
 		}
 		// Seed task-relevant skills so the agent sees them on its first turn.
 		// Kept AFTER the task: these are search results derived from the task.
-		if a.cfg.InitialRecall != nil {
-			if content := a.cfg.InitialRecall(ctx, a.cfg.Task); content != "" {
-				if _, err := a.env.Store.AppendEvent(ctx, a.env.RunID, a.cfg.SessionID,
-					&event.SystemEvent{Content: content, Marker: event.MarkerInitialRecall}); err != nil {
-					return err
-				}
-			}
+		if err := a.seedInitialRecall(ctx, a.cfg.Task); err != nil {
+			return err
+		}
+	} else {
+		// No task (a chat session): seed only what needs no query — the
+		// operator's pinned skills. It is then just more framing, folded into
+		// the leading system cluster like the rest of step 0.
+		if err := a.seedInitialRecall(ctx, ""); err != nil {
+			return err
 		}
 	}
 
@@ -680,6 +683,22 @@ func (a *EventLoopAgent) bootstrap(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// seedInitialRecall appends the session-start recall seed for task ("" = no
+// task) as a step-0 SystemEvent, if the agent has a seeder and it returns
+// anything.
+func (a *EventLoopAgent) seedInitialRecall(ctx context.Context, task string) error {
+	if a.cfg.InitialRecall == nil {
+		return nil
+	}
+	content := a.cfg.InitialRecall(ctx, task)
+	if content == "" {
+		return nil
+	}
+	_, err := a.env.Store.AppendEvent(ctx, a.env.RunID, a.cfg.SessionID,
+		&event.SystemEvent{Content: content, Marker: event.MarkerInitialRecall})
+	return err
 }
 
 // loop is the main agent loop.

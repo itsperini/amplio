@@ -111,7 +111,7 @@ func tsAttr(name string, t time.Time) string {
 const (
 	MarkerSystemPrompt  = "system_prompt"  // the agent's system prompt (step-0 bootstrap)
 	MarkerCLITools      = "cli_tools"      // available external CLI tools (step-0 bootstrap)
-	MarkerInitialRecall = "initial_recall" // task-relevant skills seeded at bootstrap
+	MarkerInitialRecall = "initial_recall" // session-start recall seed: pinned + task-relevant skills/lessons
 	MarkerWorkspace     = "workspace"      // the agent's working-tree description (step-0 bootstrap)
 	MarkerAgentsMD      = "agents_md"      // operator AGENTS.md instructions (step-0 bootstrap)
 	MarkerNewSession    = "new_session"    // the trailing "new session started" bootstrap marker

@@ -36,6 +36,8 @@ not set, that sub-system will be disabled. Other useful configs:
 | `[run] llms` | — | the model menu offered for new runs; the first entry is the default |
 | `[skills] dirs` | built-in | skill source directories, layered in order |
 | `[skills] blocked` | — | skill names to exclude from every source |
+| `[skills] initial` | `5` | how many skills, ranked by relevance to the task, are listed at session start |
+| `[skills] pinned` | — | skill dirs whose skills are always listed at session start (below) |
 | `[lessons] search` | `true` | let agents search lessons mined from past runs (below) |
 | `[bridge.<name>]` | — | a named LLM bridge endpoint ([models](models.md)) |
 | `[response_rewrite]` | off | plain-prose restatement of chat conclusions (below) |
@@ -110,6 +112,34 @@ Leave `embed_model` empty and amplio starts fine, reporting recall as disabled:
 
 Skills are re-scanned at startup, and their embeddings are cached in the
 database, so only new or changed files cost an embedding call.
+
+### What an agent sees at session start
+
+Every session begins with a short list of skills (name and description; the
+agent loads a full skill with `recall_load`). By default it is the 5 skills
+most relevant to the session's task, ranked across all skill dirs together.
+Two keys change that:
+
+```toml
+[skills]
+dirs    = ["/team/shared/skills", "~/domain-skills"]
+initial = 5                    # relevance-ranked skills to list; 0 = none
+pinned  = ["~/domain-skills"]  # dirs whose skills are ALWAYS listed
+```
+
+**Pinned** skills are listed in every session, whatever the task, in a section
+of their own, and they don't count against `initial`: the relevant section is
+filled from the remaining skills, so nothing is listed twice. This is for a
+small set of skills specific to the problems you work on, which you want every
+agent to know about rather than hoping they rank. A pinned dir must also be in
+`dirs` (amplio warns and ignores it otherwise). If a pinned skill's name is
+overridden by a later, unpinned dir, the skill that wins is not pinned.
+
+Pinning costs context in every session, sub-agents included, so keep the set
+small. A chat session has no task to rank against, so it is shown the pinned
+skills only.
+
+The lesson list at session start is unaffected by those configs.
 
 ### Isolating runs from past lessons
 

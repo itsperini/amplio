@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"amplio/internal/config"
 	"amplio/internal/embed"
 	"amplio/internal/vec"
 )
@@ -41,15 +42,29 @@ type Index struct {
 
 	mu      sync.RWMutex
 	entries map[string]Entry
-	names   []string    // row order
-	matrix  [][]float32 // L2-normalized vectors, row per name
+	names   []string        // row order
+	matrix  [][]float32     // L2-normalized vectors, row per name
+	pinned  map[string]bool // names of entries from a pinned source
 	built   bool
+
+	// initial is how many relevance-ranked skills the session-start seed lists
+	// (see Initial). An instance-wide recall policy carried on the index — like
+	// lessons.Index's recall switch — because the index is the one per-instance
+	// recall object every agent already receives. Set once at startup.
+	initial int
 }
 
 // NewIndex constructs an index; call Build to populate (does I/O + embeds).
 func NewIndex(sources []Source, embedder embed.Embedder, cache Cache) *Index {
-	return &Index{sources: sources, embedder: embedder, cache: cache}
+	return &Index{sources: sources, embedder: embedder, cache: cache, initial: config.DefaultSkillsInitial}
 }
+
+// SetInitialLimit sets how many relevance-ranked skills the session-start seed
+// lists, in addition to pinned ones ([skills].initial). Call once at startup.
+func (ix *Index) SetInitialLimit(n int) { ix.initial = max(n, 0) }
+
+// InitialLimit is how many relevance-ranked skills the session-start seed lists.
+func (ix *Index) InitialLimit() int { return ix.initial }
 
 func embedText(e Entry) string { return e.Name + ": " + e.Description }
 
@@ -97,10 +112,11 @@ func (ix *Index) LoadCached(ctx context.Context) int {
 		}
 		matrix = append(matrix, vec.Normalize(c.Vector))
 	}
+	pinned := pinnedNames(ix.sources, entryMap)
 	ix.mu.Lock()
-	ix.entries, ix.names, ix.matrix, ix.built = entryMap, names, matrix, true
+	ix.entries, ix.names, ix.matrix, ix.pinned, ix.built = entryMap, names, matrix, pinned, true
 	ix.mu.Unlock()
-	slog.Info("skill index hydrated from cache (background reconcile to follow)", "skills", len(names))
+	slog.Info("skill index hydrated from cache (background reconcile to follow)", "skills", len(names), "pinned", len(pinned))
 	return len(names)
 }
 
@@ -188,10 +204,11 @@ func (ix *Index) buildOnce(ctx context.Context) error {
 		slog.Warn("skill cache save failed", "error", err)
 	}
 
+	pinned := pinnedNames(ix.sources, entryMap)
 	ix.mu.Lock()
-	ix.entries, ix.names, ix.matrix, ix.built = entryMap, names, matrix, true
+	ix.entries, ix.names, ix.matrix, ix.pinned, ix.built = entryMap, names, matrix, pinned, true
 	ix.mu.Unlock()
-	slog.Info("skill index built", "skills", len(names), "embedded", len(fresh), "reused", len(reuse))
+	slog.Info("skill index built", "skills", len(names), "pinned", len(pinned), "embedded", len(fresh), "reused", len(reuse))
 	return nil
 }
 
@@ -207,6 +224,13 @@ func (ix *Index) Size() int {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 	return len(ix.names)
+}
+
+// PinnedCount is the number of indexed skills that come from a pinned source.
+func (ix *Index) PinnedCount() int {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	return len(ix.pinned)
 }
 
 // Load returns the parsed entry for name (in-memory; no file read).
@@ -229,6 +253,59 @@ func (ix *Index) Search(ctx context.Context, query string, k int) ([]Hit, error)
 	if k <= 0 || len(names) == 0 || query == "" {
 		return nil, nil
 	}
+	scores, err := ix.score(ctx, query, matrix)
+	if err != nil || scores == nil {
+		return nil, err
+	}
+	return topK(names, entries, scores, k, nil), nil
+}
+
+// Initial selects the skills listed at session start: EVERY skill from a pinned
+// source, plus the k most relevant of the rest (pinned ones never take one of
+// the k slots, and never appear twice). Pinned skills are ordered by relevance
+// to query, or by name when there is no query (a chat session) or ranking
+// failed. The query is embedded once for both.
+//
+// On an embedding error it still returns the pinned skills (by name) along
+// with the error: they don't depend on the ranking, and the caller can log the
+// failure and list them anyway.
+func (ix *Index) Initial(ctx context.Context, query string, k int) (pinned []Entry, relevant []Hit, err error) {
+	ix.mu.RLock()
+	names, matrix, entries, pinnedSet := ix.names, ix.matrix, ix.entries, ix.pinned
+	ix.mu.RUnlock()
+
+	var scores []float64
+	if query != "" && len(names) > 0 && (k > 0 || len(pinnedSet) > 0) {
+		scores, err = ix.score(ctx, query, matrix)
+	}
+
+	if len(pinnedSet) > 0 {
+		if scores != nil {
+			for _, h := range topK(names, entries, scores, len(names), func(n string) bool { return pinnedSet[n] }) {
+				pinned = append(pinned, h.Entry)
+			}
+		} else {
+			byName := make([]string, 0, len(pinnedSet))
+			for n := range pinnedSet {
+				byName = append(byName, n)
+			}
+			sort.Strings(byName)
+			for _, n := range byName {
+				pinned = append(pinned, entries[n])
+			}
+		}
+	}
+	if scores != nil && k > 0 {
+		relevant = topK(names, entries, scores, k, func(n string) bool { return !pinnedSet[n] })
+	}
+	return pinned, relevant, err
+}
+
+// score embeds query and returns its cosine similarity to every row of matrix,
+// or nil for a degenerate query vector (norm below vec.MinNorm — e.g. the
+// embedder collapsed a whitespace-only string): every row tied at zero would
+// be arbitrary-order junk.
+func (ix *Index) score(ctx context.Context, query string, matrix [][]float32) ([]float64, error) {
 	vecs, err := ix.embedder.Embed(ctx, []string{query})
 	if err != nil {
 		return nil, err
@@ -237,21 +314,29 @@ func (ix *Index) Search(ctx context.Context, query string, k int) ([]Hit, error)
 	if qv == nil {
 		return nil, nil
 	}
-	type scored struct {
-		i     int
-		score float64
-	}
-	scoredHits := make([]scored, len(names))
+	scores := make([]float64, len(matrix))
 	for i, row := range matrix {
-		scoredHits[i] = scored{i, vec.Dot(row, qv)}
+		scores[i] = vec.Dot(row, qv)
 	}
-	sort.Slice(scoredHits, func(a, b int) bool { return scoredHits[a].score > scoredHits[b].score })
-	if k > len(scoredHits) {
-		k = len(scoredHits)
+	return scores, nil
+}
+
+// topK returns up to k entries by descending score, considering only names for
+// which keep reports true (nil keep = all).
+func topK(names []string, entries map[string]Entry, scores []float64, k int, keep func(string) bool) []Hit {
+	idx := make([]int, 0, len(names))
+	for i, n := range names {
+		if keep == nil || keep(n) {
+			idx = append(idx, i)
+		}
+	}
+	sort.SliceStable(idx, func(a, b int) bool { return scores[idx[a]] > scores[idx[b]] })
+	if k > len(idx) {
+		k = len(idx)
 	}
 	out := make([]Hit, 0, k)
-	for _, s := range scoredHits[:k] {
-		out = append(out, Hit{Entry: entries[names[s.i]], Score: s.score})
+	for _, i := range idx[:k] {
+		out = append(out, Hit{Entry: entries[names[i]], Score: scores[i]})
 	}
-	return out, nil
+	return out
 }

@@ -70,16 +70,10 @@ func factory(env *agent.Env, cfg *agent.Config) (agent.Agent, error) {
 		SkillIndex:  env.SkillIndex,
 		LessonIndex: env.LessonIndex,
 	})
-	// Task-relevant seeding over whichever corpora are built. Gated on the same
-	// condition as the recall TOOLS (see toolset.Build): the index objects
-	// existing, not their being built yet.
-	var initialRecall func(ctx context.Context, task string) string
-	if env.SkillIndex != nil || env.LessonIndex != nil {
-		sIx, lIx := env.SkillIndex, env.LessonIndex
-		initialRecall = func(ctx context.Context, task string) string {
-			return recall.InitialContent(ctx, sIx, lIx, task)
-		}
-	}
+	// Session-start seeding over whichever corpora exist (pinned skills plus
+	// the task-relevant ones). Gated on the same condition as the recall TOOLS
+	// (see toolset.Build): the index objects existing, not their being built yet.
+	initialRecall := recall.Seeder(env.SkillIndex, env.LessonIndex)
 
 	ag = eventloop.New(env, eventloop.Config{
 		SessionID:    cfg.SessionID,

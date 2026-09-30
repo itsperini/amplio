@@ -398,6 +398,38 @@ func TestLoad_ExpandsTildeInPaths(t *testing.T) {
 	}
 }
 
+// [skills] initial / pinned: parsed, pinned paths tilde-expanded, initial
+// defaulting to DefaultSkillsInitial when omitted and honoring an explicit 0.
+func TestLoad_SkillsInitialAndPinned(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"),
+		[]byte("[skills]\ndirs = [\"~/mine\"]\ninitial = 0\npinned = [\"~/mine\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.SkillsInitial(); got != 0 {
+		t.Errorf("SkillsInitial = %d, want the explicit 0", got)
+	}
+	if want := filepath.Join(home, "mine"); len(cfg.Skills.Pinned) != 1 || cfg.Skills.Pinned[0] != want {
+		t.Errorf("skills.pinned = %v, want [%s]", cfg.Skills.Pinned, want)
+	}
+
+	if got := (Config{}).SkillsInitial(); got != DefaultSkillsInitial {
+		t.Errorf("omitted initial = %d, want %d", got, DefaultSkillsInitial)
+	}
+	neg := -3
+	if got := (Config{Skills: SkillsConfig{Initial: &neg}}).SkillsInitial(); got != 0 {
+		t.Errorf("negative initial = %d, want 0", got)
+	}
+}
+
 // Lesson search: default on, and every layer able to turn it off.
 func TestResolve_LessonSearchLayers(t *testing.T) {
 	ptr := func(b bool) *bool { return &b }

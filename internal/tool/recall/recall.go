@@ -41,10 +41,11 @@ const (
 	// stays readable in the tool output.
 	descPreviewMax = 300
 
-	// initialRecallHits is how many hits per corpus the run-start seed shows —
+	// initialLessonHits is how many lessons the session-start seed shows —
 	// intentionally terser than the recall_search default (10) since it's
-	// unsolicited bootstrap context, not an explicit query.
-	initialRecallHits = 5
+	// unsolicited bootstrap context, not an explicit query. (The skill count is
+	// the operator's [skills].initial, carried on the skill index.)
+	initialLessonHits = 5
 )
 
 func skillReady(ix *skills.Index) bool { return ix != nil && ix.IsBuilt() }
@@ -199,24 +200,54 @@ func formatLesson(l db.LessonRecord) string {
 		l.Title, l.LessonID, src, l.Score, l.LoadedCount, l.Body)
 }
 
-// InitialContent returns a short "relevant to this task" block to seed at run
-// start (for non-empty tasks) so the agent sees applicable skills/lessons
-// without searching first. Returns "" on no hits / empty task.
-func InitialContent(ctx context.Context, skillIx *skills.Index, lessonIx *lessons.Index, task string) string {
-	if task == "" {
-		return ""
+// Seeder returns the session-start recall seed for an agent factory to wire as
+// its InitialRecall, or nil when neither corpus exists. Shared so every agent
+// type seeds the same way.
+func Seeder(skillIx *skills.Index, lessonIx *lessons.Index) func(ctx context.Context, task string) string {
+	if skillIx == nil && lessonIx == nil {
+		return nil
 	}
+	return func(ctx context.Context, task string) string {
+		return InitialContent(ctx, skillIx, lessonIx, task)
+	}
+}
+
+// InitialContent returns the block seeded at session start so the agent sees
+// applicable skills/lessons without searching first:
+//
+//   - every skill from a pinned source ([skills].pinned) — always, even with no
+//     task (a chat session), since pinning doesn't depend on a query;
+//   - the [skills].initial most relevant other skills, and the most relevant
+//     lessons — only for a non-empty task, which is the query.
+//
+// Returns "" when there is nothing to list.
+func InitialContent(ctx context.Context, skillIx *skills.Index, lessonIx *lessons.Index, task string) string {
 	var b strings.Builder
 	if skillReady(skillIx) {
-		if hits, err := skillIx.Search(ctx, task, initialRecallHits); err == nil && len(hits) > 0 {
-			b.WriteString("Skills that may be relevant — read one with recall_load, or recall_search for more:\n")
-			for _, h := range hits {
+		pinned, relevant, err := skillIx.Initial(ctx, task, skillIx.InitialLimit())
+		if err != nil {
+			// Pinned skills don't depend on the ranking; list them regardless.
+			slog.Warn("initial skill recall: ranking failed; listing pinned skills only", "error", err)
+		}
+		if len(pinned) > 0 {
+			b.WriteString("Skills pinned by the operator — always listed; read one with recall_load:\n")
+			for _, e := range pinned {
+				fmt.Fprintf(&b, "  %s%s — %s\n", skillPrefix, e.Name, preview(e.Description))
+			}
+		}
+		if len(relevant) > 0 {
+			if len(pinned) > 0 {
+				b.WriteString("\nOther skills that may be relevant — read one with recall_load, or recall_search for more:\n")
+			} else {
+				b.WriteString("Skills that may be relevant — read one with recall_load, or recall_search for more:\n")
+			}
+			for _, h := range relevant {
 				fmt.Fprintf(&b, "  %s%s — %s\n", skillPrefix, h.Entry.Name, preview(h.Entry.Description))
 			}
 		}
 	}
-	if lessonReady(lessonIx) {
-		if hits, err := lessonIx.Search(ctx, task, initialRecallHits); err == nil && len(hits) > 0 {
+	if task != "" && lessonReady(lessonIx) {
+		if hits, err := lessonIx.Search(ctx, task, initialLessonHits); err == nil && len(hits) > 0 {
 			if b.Len() > 0 {
 				b.WriteString("\n")
 			}
